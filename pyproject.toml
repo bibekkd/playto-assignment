@@ -11,6 +11,11 @@ dependencies = [
     "redis>=5.0",
     "django-celery-beat>=2.6",
     "python-dotenv>=1.0",
+    # Production extras
+    "gunicorn>=22.0",
+    "whitenoise>=6.6",
+    "dj-database-url>=2.2",
+    "django-cors-headers>=4.4",
 ]
 
 [tool.uv]

@@ -39,7 +39,11 @@ export type Payout = {
   updated_at: string
 }
 
-const BASE = '/api/v1'
+// In dev, leave VITE_API_BASE_URL unset and the Vite proxy forwards `/api`
+// to Django on :8000. In production (Vercel), set VITE_API_BASE_URL to
+// the Render service URL, e.g. `https://playto-payout.onrender.com`.
+const API_ROOT = import.meta.env.VITE_API_BASE_URL ?? ''
+const BASE = `${API_ROOT}/api/v1`
 
 export async function listMerchants(): Promise<Merchant[]> {
   const r = await fetch(`${BASE}/merchants`)
