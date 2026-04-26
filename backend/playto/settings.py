@@ -72,8 +72,13 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # CORS — comma-separated list of origins allowed to call the API.
 # Vercel preview URLs change per-branch, so we also allow a regex.
+# django-cors-headers rejects entries with a trailing slash or path
+# (corsheaders.E014); strip them defensively so a stray "/" in the env
+# value doesn't fail the build.
 CORS_ALLOWED_ORIGINS = [
-    o.strip() for o in os.environ.get("DJANGO_CORS_ORIGINS", "").split(",") if o.strip()
+    o.strip().rstrip("/")
+    for o in os.environ.get("DJANGO_CORS_ORIGINS", "").split(",")
+    if o.strip()
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",  # all Vercel previews
@@ -87,7 +92,9 @@ CORS_ALLOW_HEADERS = [
 
 # CSRF trusted origins (for Render's host + any explicit ones).
 CSRF_TRUSTED_ORIGINS = [
-    o.strip() for o in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if o.strip()
+    o.strip().rstrip("/")
+    for o in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
+    if o.strip()
 ]
 if RENDER_HOST:
     CSRF_TRUSTED_ORIGINS.append(f"https://{RENDER_HOST}")

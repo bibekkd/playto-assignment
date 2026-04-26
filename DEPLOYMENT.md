@@ -151,7 +151,7 @@ The Shell-tab approach is what I recommend.
 Until step 6, the backend's CORS config trusts any `*.vercel.app` origin via regex (which works for previews). For production, also add the explicit prod URL:
 
 1. Render → `playto-payout` web service → Environment.
-2. Set `DJANGO_CORS_ORIGINS` = `https://playto-payout.vercel.app` (or whatever your Vercel prod alias is).
+2. Set `DJANGO_CORS_ORIGINS` = `https://playto-payout.vercel.app` (or your Vercel prod alias). **No trailing slash, no path** — django-cors-headers rejects those (`corsheaders.E014`). Multiple origins: comma-separated.
 3. Save → Render auto-redeploys (~2 min).
 
 The regex `*.vercel.app` stays in place so preview URLs continue to work. The explicit list is belt-and-braces.
