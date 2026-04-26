@@ -159,8 +159,15 @@ def create_payout(request, merchant_id):
 
     # Step 8: enqueue work AFTER commit so the worker can't read a row
     # that hasn't been committed yet.
-    from .tasks import process_payout
-    process_payout.delay(str(payout.id))
+    #
+    # In `cron` mode (Render free tier) there's no long-lived Celery
+    # worker — a scheduled `manage.py drain_payouts` picks up pending
+    # rows directly from Postgres. We skip the .delay() round-trip so
+    # we don't pile messages onto a queue nobody is reading.
+    from django.conf import settings as _settings
+    if _settings.PAYOUT_WORKER_MODE != "cron":
+        from .tasks import process_payout
+        process_payout.delay(str(payout.id))
 
     return _replay(body_text, status.HTTP_201_CREATED)
 
@@ -189,6 +196,38 @@ def merchant_detail(request, merchant_id):
             "recent_entries": list(recent),
         }
     )
+
+
+@api_view(["POST"])
+def drain(request):
+    """Internal endpoint hit by an external scheduler (UptimeRobot, etc).
+
+    Drains `pending` payouts and retries `processing` payouts that are
+    stuck. Protected by a shared secret header so a random scanner can't
+    trigger it.
+
+    Auth: header `X-Drain-Token` must equal the `DRAIN_TOKEN` env var.
+    Returns 503 if no token is configured (i.e. this endpoint is disabled).
+    """
+    from django.conf import settings as _settings
+    from .tasks import process_pending_payouts, retry_stuck_payouts
+
+    expected = _settings.DRAIN_TOKEN
+    if not expected:
+        return Response(
+            {"error": "drain_disabled"}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+    presented = request.headers.get("X-Drain-Token", "")
+    # Constant-time comparison to avoid timing oracle.
+    import hmac
+    if not hmac.compare_digest(presented, expected):
+        return Response(
+            {"error": "unauthorized"}, status=status.HTTP_401_UNAUTHORIZED
+        )
+
+    drained = process_pending_payouts()
+    requeued = retry_stuck_payouts()
+    return Response({"drained": drained, "requeued": requeued})
 
 
 @api_view(["GET"])

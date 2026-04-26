@@ -104,6 +104,43 @@ def _fail_and_reverse(payout: Payout, reason: str) -> None:
 
 
 @shared_task
+def process_pending_payouts(limit: int = 100) -> int:
+    """Drain `pending` payouts from the database.
+
+    On Render's free tier we can't run a long-lived Celery worker, so a
+    scheduled Cron Job invokes this every minute. SKIP LOCKED means two
+    overlapping cron firings (e.g. a slow run still going when the next
+    one starts) don't fight over the same rows.
+
+    Returns the count of payouts kicked off.
+    """
+    picked: list[str] = []
+    with transaction.atomic(), connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id FROM payout
+            WHERE status = 'pending'
+            ORDER BY created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT %s
+            """,
+            [limit],
+        )
+        picked = [str(row[0]) for row in cur.fetchall()]
+
+    # Process each one in its own transaction. Run inline (not via .delay)
+    # because in cron-mode we ARE the worker — there's nothing else to run
+    # the queued task.
+    for pid in picked:
+        try:
+            process_payout.run(pid)
+        except Exception as e:
+            log.exception("process_payout(%s) failed: %s", pid, e)
+    log.info("process_pending_payouts: drained=%d", len(picked))
+    return len(picked)
+
+
+@shared_task
 def retry_stuck_payouts() -> int:
     """Re-enqueue payouts that have been stuck in `processing` too long.
 

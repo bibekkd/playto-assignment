@@ -116,3 +116,15 @@ CELERY_BROKER_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_EAGER", "0") == "1"
 CELERY_TIMEZONE = "UTC"
+
+# Worker mode toggle. In production on Render free tier we run a Cron Job
+# that calls `manage.py drain_payouts` every minute instead of a long-lived
+# Celery worker. In that mode the view skips `.delay()` (nothing is reading
+# the queue) and the cron picks the payout up by querying `pending` rows.
+PAYOUT_WORKER_MODE = os.environ.get("PAYOUT_WORKER_MODE", "celery")  # "celery" | "cron"
+
+# Shared secret for the POST /api/v1/internal/drain endpoint, hit by an
+# external scheduler (UptimeRobot) on free plans where Render's own
+# Background Worker / Cron Job is paid. Empty → endpoint returns 503
+# (disabled). See DEPLOYMENT.md §4.
+DRAIN_TOKEN = os.environ.get("DRAIN_TOKEN", "")
