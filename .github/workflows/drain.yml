@@ -1,0 +1,41 @@
+name: Drain pending payouts
+
+# Replaces a paid Render Background Worker / Cron Job and a paid UptimeRobot
+# monitor. GitHub Actions on a public repo is unlimited; on a private repo
+# it costs ~5 minutes/day, well inside the 2000 min/month free quota.
+#
+# What it does: every 5 minutes (and on manual trigger), POST to the
+# token-protected drain endpoint on the deployed Django service. The
+# endpoint runs `process_pending_payouts` + `retry_stuck_payouts` and
+# returns `{"drained": N, "requeued": M}`.
+
+on:
+  schedule:
+    # GitHub's smallest cron interval is 5 minutes. Note: GitHub may delay
+    # scheduled runs under heavy load; for demo purposes this is fine
+    # because we also expose `workflow_dispatch` for instant manual fires.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}        # "Run workflow" button in the GitHub UI
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: POST /api/v1/internal/drain
+        env:
+          DRAIN_URL: ${{ secrets.DRAIN_URL }}
+          DRAIN_TOKEN: ${{ secrets.DRAIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DRAIN_URL:-}" ] || [ -z "${DRAIN_TOKEN:-}" ]; then
+            echo "::error::DRAIN_URL or DRAIN_TOKEN secret is not set"
+            exit 1
+          fi
+          # -sS keeps curl quiet on success but loud on errors.
+          # -f makes curl exit non-zero on >=400 responses.
+          # -w prints status + a summary line at the end.
+          response=$(curl -sS -f -X POST "$DRAIN_URL" \
+            -H "X-Drain-Token: $DRAIN_TOKEN" \
+            -w "\nHTTP %{http_code} in %{time_total}s\n")
+          echo "$response"

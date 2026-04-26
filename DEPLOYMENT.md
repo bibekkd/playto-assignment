@@ -43,7 +43,10 @@ Backend on **Render free tier**, frontend on **Vercel**, manual click-through (n
 
 1. Render dashboard → **New** → **Web Service** → **Build and deploy from a Git repository** → connect your GitHub repo.
 2. Settings:
-   - **Name:** `playto-payout` (this becomes `playto-payout.onrender.com`)
+   - **Name:** `playto-payout`. **Render appends a random suffix** to the
+     URL if the bare name is taken, so your final hostname will be
+     something like `playto-payout-0l68.onrender.com`. Copy it from the
+     service header after creation — every other step uses this URL.
    - **Region:** same as DB
    - **Branch:** `main` (or whatever you push to)
    - **Root Directory:** *leave blank* (whole repo)
@@ -76,17 +79,19 @@ Backend on **Render free tier**, frontend on **Vercel**, manual click-through (n
 
 ---
 
-## 4. Payout drainer (UptimeRobot — free)
+## 4. Payout drainer (GitHub Actions — free)
 
-Render charges for Background Workers and Cron Jobs. We work around it by
-exposing a token-protected `POST /api/v1/internal/drain` endpoint on the
-web service and pinging it from **UptimeRobot** (free, 5-min interval).
+Render charges for Background Workers and Cron Jobs. UptimeRobot's free
+tier disallows custom HTTP methods/headers (paid Solo plan only). The
+free, sustainable substitute is a **GitHub Actions** workflow that fires
+on a `*/5 * * * *` schedule and POSTs to a token-protected drain endpoint
+on the deployed Django service.
 
 The endpoint runs both phases a worker would have run:
   1. drain new `pending` payouts → `processing` → `completed | failed`
   2. retry any `processing` payouts stuck past 30s
 
-Both use `SELECT … FOR UPDATE SKIP LOCKED` so overlapping pings can't
+Both use `SELECT … FOR UPDATE SKIP LOCKED` so overlapping runs can't
 double-process a row. The endpoint requires the header
 `X-Drain-Token: <secret>` and returns 401 without it.
 
@@ -104,91 +109,116 @@ double-process a row. The endpoint requires the header
 3. Save → Render redeploys (~2 min). Sanity check from your laptop:
    ```
    # 401 expected — no token
-   curl -i -X POST https://playto-payout.onrender.com/api/v1/internal/drain
+   curl -i -X POST https://playto-payout-<your-suffix>.onrender.com/api/v1/internal/drain
 
    # 200 + JSON expected — correct token
-   curl -X POST https://playto-payout.onrender.com/api/v1/internal/drain \
+   curl -X POST https://playto-payout-<your-suffix>.onrender.com/api/v1/internal/drain \
         -H "X-Drain-Token: <your-token>"
    # → {"drained":0,"requeued":0}
    ```
 
-### 4b. Set up UptimeRobot to ping the endpoint every 5 minutes
+### 4b. Set up GitHub Actions
 
-1. Sign up free at https://uptimerobot.com (no card required).
-2. Dashboard → **+ New monitor**.
-3. Settings:
-   - **Monitor Type:** HTTP(s)
-   - **Friendly Name:** `playto-drain`
-   - **URL:** `https://playto-payout.onrender.com/api/v1/internal/drain`
-   - **Monitoring Interval:** 5 minutes (free tier minimum)
-   - Expand **HTTP Settings**:
-     - **HTTP Method:** `POST`
-     - **Custom HTTP Headers** (one per line):
-       ```
-       X-Drain-Token: <your-token>
-       ```
-   - Expand **Advanced Settings → Custom HTTP Statuses**: treat `200` as up.
-4. **Create Monitor**.
+The workflow file is already in the repo at
+[`.github/workflows/drain.yml`](.github/workflows/drain.yml). It runs
+every 5 minutes and exposes a manual "Run workflow" button for instant
+demos. You only need to add two repository secrets.
 
-UptimeRobot will now POST every 5 minutes. Two birds with one stone:
-- It drains pending payouts.
-- It also keeps the Render free-tier web service warm, eliminating the
-  ~30s cold start after idle.
+1. Push the workflow file to GitHub if you haven't already (it lives at
+   `.github/workflows/drain.yml`).
+2. GitHub repo → **Settings** → **Secrets and variables** → **Actions** →
+   **New repository secret**. Add two:
+
+   | Name | Value |
+   |---|---|
+   | `DRAIN_URL` | `https://playto-payout-<your-suffix>.onrender.com/api/v1/internal/drain` (full URL including the path) |
+   | `DRAIN_TOKEN` | the same token you set on Render in step 4a |
+
+3. Verify it works:
+   - GitHub repo → **Actions** tab → **Drain pending payouts** workflow
+     in the left sidebar → **Run workflow** → confirm.
+   - The run finishes in ~3 seconds and the log should show:
+     ```
+     {"drained":0,"requeued":0}
+     HTTP 200 in 0.243s
+     ```
+   - From now on, the cron schedule fires automatically every 5 minutes.
 
 ### 4c. Trade-offs
 
-- **Latency:** payouts now move from `pending → completed` in up to 5
-  minutes. The dashboard polls every 2s so the transition is visible
-  the moment UptimeRobot fires. For a live demo, hit the **Test Now**
-  button on the UptimeRobot monitor to fire it immediately.
+- **Latency:** payouts move from `pending → completed` in up to 5
+  minutes (worst case; usually less because GitHub Actions cron drift
+  averages ~1–2 min). The dashboard polls every 2s so the transition
+  is visible the moment the workflow fires.
+- **For a live demo:** click **Run workflow** on the GitHub Actions page
+  to fire it immediately, or curl the endpoint directly:
+  ```
+  curl -X POST <DRAIN_URL> -H "X-Drain-Token: <token>"
+  ```
 - **The endpoint is open by URL but secret by token.** A 32-byte
-  `secrets.token_urlsafe` is unguessable; HMAC-equal comparison in the
-  view prevents timing attacks.
+  `secrets.token_urlsafe` is unguessable; constant-time
+  `hmac.compare_digest` comparison in the view prevents timing attacks.
+- **Cold-start mitigation:** the cron also keeps the Render free-tier
+  web service warm. Without it, the first request after 15 min of idle
+  takes ~30s; with it, never.
 
 > **Why this approach is honest, not a hack.** Postgres is the queue
 > (`pending` rows). The drain endpoint is a worker (a separate process
-> draining the queue, not running inside the POST handler). UptimeRobot
-> is the scheduler. Celery is still wired up so local `make worker`
-> works as before. The brief's "do not fake it with sync code" rule is
-> satisfied: processing happens out-of-band from the request that
-> created the payout.
+> draining the queue, not running inside the POST handler). GitHub
+> Actions is the scheduler. Celery is still wired up so local
+> `make worker` works as before. The brief's "do not fake it with sync
+> code" rule is satisfied: processing happens out-of-band from the
+> request that created the payout.
 
 ---
 
 ## 5. Seed the remote database
 
-Render's **Shell** tab on the web service is the cleanest path. The `seed_demo` management command is idempotent.
+Render's **Shell** tab is paid-only. The cleanest free alternative is to
+run the management command from your laptop, pointing it at the remote
+Postgres via its **External Database URL**.
 
-1. Open the `playto-payout` web service in Render.
-2. Click the **Shell** tab (left sidebar).
-3. Wait for the shell to attach (~10s).
-4. Run:
+1. Render → `playto-postgres` database → **Info** tab → copy the
+   **External Database URL** (NOT the internal one — internal is only
+   reachable from inside Render's network). It looks like:
    ```
-   cd backend && uv run python manage.py seed_demo
+   postgresql://playto_user:xxxxx@dpg-xxxxx-a.singapore-postgres.render.com/playto_db
    ```
-5. You should see:
+
+2. From this repo on your laptop:
+   ```bash
+   DATABASE_URL="<paste-the-external-url>" \
+     uv run --project . python backend/manage.py seed_demo
+   ```
+
+3. You should see:
    ```
    [ok]   Acme Studios (...) balance=7023579 paise
    [ok]   Bluegrass Agency (...) balance=23333333 paise
    [ok]   Coral Freelancer (...) balance=1525174 paise
    ```
-6. Verify via curl from your laptop:
-   ```
+
+4. Verify from your laptop:
+   ```bash
    curl -s https://playto-payout.onrender.com/api/v1/merchants
    ```
-   should return three merchants.
+   Three merchants returned.
 
-**To wipe and reseed** (dev only, destructive):
+**To wipe and reseed** (destructive, careful):
+```bash
+DATABASE_URL="<external-url>" \
+  uv run --project . python backend/manage.py seed_demo --reset
 ```
-cd backend && uv run python manage.py seed_demo --reset
-```
 
-**Two other options for seeding** (if Shell tab is broken or you want it scripted):
+> **SSL note.** Render's Postgres requires SSL. `dj_database_url` in our
+> `settings.py` already passes `ssl_require=True`, so the external URL
+> works out of the box. If you ever connect with raw `psql`, append
+> `?sslmode=require` to the URL.
 
-- **psql + COPY:** copy `DATABASE_URL` from the dashboard, run `psql "$DATABASE_URL"` from your laptop, paste raw INSERTs. Workable but verbose for the ledger entries.
-- **One-off Render Job:** New → Cron Job (or Job) → same repo → command `cd backend && uv run python manage.py seed_demo`. Run it once manually. Adds a service to manage; only worth it if you find yourself reseeding frequently.
+**Fallback options** if Option A doesn't work for you:
 
-The Shell-tab approach is what I recommend.
+- **psql + raw SQL:** `psql "<external-url>"` and paste INSERTs. Verbose; not recommended for the ledger entries.
+- **Temporary HTTPS seed endpoint:** add a token-protected `POST /api/v1/internal/seed` view, hit it once with curl, remove it. Only if you really can't connect from your laptop.
 
 ---
 
@@ -227,20 +257,22 @@ After all five services are up:
 1. Open the Vercel URL.
 2. Switch the merchant dropdown — three merchants visible.
 3. Submit a 500-rupee payout. It appears in history as `pending` immediately.
-4. Wait up to **5 minutes** for the next UptimeRobot ping. The row flips to `processing` → `completed`. Balance drops by ₹500.
-5. Check Render → `playto-payout` → Logs. Each ping you should see:
+4. Wait up to **5 minutes** for the next GitHub Actions cron run. The row flips to `processing` → `completed`. Balance drops by ₹500.
+5. Check Render → `playto-payout` → Logs. After each Actions run you should see:
    ```
    POST /api/v1/internal/drain → 200 ({"drained":1,"requeued":0})
    payout <uuid> completed (roll=0.412)
    ```
-6. Demo failure path: on the WEB service env, set `PAYOUT_SETTLEMENT_FORCE=0.8`, save (auto-redeploy). Submit another payout → next ping it goes `failed`, balance returns to its pre-debit value via REVERSAL.
+6. Demo failure path: on the WEB service env, set `PAYOUT_SETTLEMENT_FORCE=0.8`, save (auto-redeploy). Submit another payout → next run it goes `failed`, balance returns to its pre-debit value via REVERSAL.
 7. Unset the env (or set back to nothing) when done.
 
-**Don't want to wait 5 min during the demo?** UptimeRobot dashboard → click your monitor → **Test Now**. Or just curl the endpoint manually:
-```
-curl -X POST https://playto-payout.onrender.com/api/v1/internal/drain \
-     -H "X-Drain-Token: <your-token>"
-```
+**Don't want to wait 5 min during the demo?** Two ways to fire instantly:
+- **GitHub Actions tab → Drain pending payouts → Run workflow.** Done in ~3 seconds.
+- Or curl the endpoint manually:
+  ```
+  curl -X POST https://playto-payout-<your-suffix>.onrender.com/api/v1/internal/drain \
+       -H "X-Drain-Token: <your-token>"
+  ```
 
 ---
 
@@ -253,7 +285,7 @@ Free tier covers everything in this guide:
 | Render Postgres | Free | 1 GB storage, 90-day retention warning — fine for demo |
 | Render Redis | Free | 25 MB |
 | Render web | Free | Sleeps after 15 min idle, ~30s wake |
-| UptimeRobot ping | Free | POSTs `/internal/drain` every 5 min; doubles as keep-alive |
+| GitHub Actions cron | Free | POSTs `/internal/drain` every 5 min; doubles as keep-alive. Public repo: unlimited; private repo: ~5 min/day, well under the 2000 min/month free quota |
 | Vercel frontend | Hobby | Always-on |
 
 Total monthly: **$0**. The only cost is the ~30s cold-start on the first request after idle, which I'll mention to the reviewer.
